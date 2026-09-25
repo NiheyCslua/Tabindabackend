@@ -1,0 +1,10 @@
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "upc" TEXT;
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "barcode" TEXT NOT NULL DEFAULT '';
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "serialNumber" TEXT;
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "serialNumbers" JSONB;
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "vendorId" TEXT;
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "vendorName" TEXT;
+
+UPDATE "Product"
+SET "barcode" = COALESCE(NULLIF("barcode", ''), "upc", '')
+WHERE "barcode" = '' OR "barcode" IS NULL;

@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Bill" ADD COLUMN     "billType" TEXT NOT NULL DEFAULT 'CREDIT';

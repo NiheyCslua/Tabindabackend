@@ -1,0 +1,454 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  EMPLOYEE
+  INVENTORY_MANAGER
+}
+
+// ── Phase 5: Financial Accounts (Chart of Accounts foundation) ────────────────
+//
+// Single source of truth for every cash/bank/wallet account in the system.
+// Every module that moves money (Invoices, Vendor Payments, Vendor Receipts,
+// Employee Payments, Misc Ledger) references a FinancialAccount by id via a
+// `financialAccountId` field instead of hardcoding bank names. Balances are
+// never stored — they are always derived as:
+//   openingBalance + moneyIn - moneyOut
+// so edited/deleted transactions never leave a stale balance behind.
+enum FinancialAccountType {
+  CASH
+  BANK
+  MOBILE_WALLET
+}
+
+model FinancialAccount {
+  id                 String               @id @default(uuid())
+  name               String               @unique
+  type               FinancialAccountType
+  openingBalance     Float                @default(0)
+  openingBalanceDate DateTime?
+  description        String?
+  isActive           Boolean              @default(true)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+}
+
+// Invoice Templates only ever supply the *default* Terms & Conditions text
+// that gets copied into a new invoice (see Invoice.termsAndConditions) —
+// editing a template never touches any existing invoice, and editing an
+// invoice never touches the template. Backed by the database (not
+// browser-local storage) so edits made in Settings are visible from any
+// device/session, not just the one that made them.
+model InvoiceTemplate {
+  id          String   @id
+  label       String
+  description String   @default("")
+  title       String
+  // Ordered list of policy paragraphs, stored as a JSON string array.
+  policies    Json
+  closing     String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model User {
+  id         String   @id @default(uuid())
+  name       String
+  // Email and password are only required for employees who have application
+  // access (role is set). Employees with "No App Access" are stored without
+  // login credentials and without a role.
+  email      String?  @unique
+  password   String?
+  role       Role?
+  phone      String?
+  cnic       String?  @unique
+  position   String?
+  status     String   @default("active")
+  salary     Float?
+  hireDate   DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Product {
+  id           String   @id @default(uuid())
+  sku          String
+  // NOTE: intentionally NOT @unique. Duplicate SKUs are allowed until the
+  // Product Variant system is complete — multiple product records
+  // currently represent different colour/configuration variants of the
+  // same item, all sharing one SKU. See "Allow Duplicate SKUs" change.
+  name         String
+  description  String?
+
+  upc           String?  @unique
+  barcode       String   @default("")
+  serialNumber  String?
+  serialNumbers Json?
+  vendorId      String?
+  vendorName    String?
+
+  category      String   @default("General")
+  // Free-text, non-hierarchical — a second label alongside category, not a
+  // parent/child relationship. e.g. category "Toners", subcategory "HP".
+  subcategory   String   @default("")
+  brand        String   @default("")
+  costPrice    Float    @default(0)
+  sellingPrice Float    @default(0)
+  taxRate      Float    @default(0)
+  quantity     Int      @default(0)
+  reorderLevel Int      @default(0)
+  maxStock     Int      @default(0)
+  status       String   @default("active")
+  image        String   @default("")
+  images       Json?
+  variants     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  invoiceItems InvoiceItem[]
+  billItems    BillItem[]
+}
+
+model Customer {
+  id          String   @id @default(uuid())
+  name        String
+  email       String?  @unique
+  phone       String
+  company     String?
+  address     String?
+  city        String?
+  state       String?
+  zipCode     String?
+  country     String?
+  creditLimit Float?
+  status      String   @default("active")
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  invoices Invoice[]
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  CANCELLED
+  OVERDUE
+}
+
+// Phase – Sales Improvements: Service Invoices reuse the exact same Invoice
+// engine as Product Invoices (numbering, customers, payments, taxes, QR
+// codes, printing, reports, Chart of Accounts) — only the line items and
+// presence of Terms & Conditions differ. See InvoicesService.buildItems.
+enum InvoiceType {
+  PRODUCT
+  SERVICE
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique
+  customerId     String?
+  customer       Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName   String
+  customerEmail  String?
+  // "Customer Number" in the UI — the customer's phone/contact number for
+  // this invoice. Optional. For a manually-entered customer there's no
+  // Customer record to fall back on, so this is the only copy; for a
+  // selected existing customer it's pre-filled from their record but
+  // editable per invoice (same "own copy, editable, optional" pattern as
+  // poNumber). Blank means nothing prints — no placeholder, no blank line.
+  customerPhone  String?
+  subtotal       Float         @default(0)
+  taxAmount      Float         @default(0)
+  discountAmount Float         @default(0)
+  shippingCost   Float         @default(0)
+  total          Float         @default(0)
+  status         InvoiceStatus @default(PENDING)
+  // Phase – Sales Improvements: Product Invoice (default, existing
+  // behaviour unchanged) or Service Invoice (labour-based, no inventory
+  // impact, no Terms & Conditions). Same engine either way — this is the
+  // only field that distinguishes them structurally.
+  invoiceType    InvoiceType   @default(PRODUCT)
+  paymentMethod  String        @default("cash")
+  bankAccount    String?
+  // Standard financial metadata — real FinancialAccount.id, populated when
+  // paymentMethod is 'bank_transfer' or 'credit_card'. `bankAccount` (the
+  // account name) is kept in sync for backward compatibility with existing
+  // reports/UI that still read it.
+  financialAccountId String?
+  template       String?
+  // Invoice Terms & Conditions (Editable Per Invoice): the Invoice Template
+  // only supplies the *default* text at creation time. Once an invoice is
+  // created, this is the invoice's own independent copy — editing the
+  // template afterwards must never change it, and editing this invoice must
+  // never change the template. Null on invoices created before this feature
+  // existed; printing/preview falls back to the template's default text for
+  // those, purely for backward compatibility.
+  termsAndConditions String?
+  invoiceDate    DateTime      @default(now())
+  dueDate        DateTime?
+  paidAt         DateTime?
+  notes          String?
+  // Purchase Order number, entered by the user per invoice. Purely
+  // optional — the "PO" heading only prints on the invoice when this has
+  // a value; left blank, nothing is shown at all (same "print only if
+  // present" pattern as Invoice.termsAndConditions and
+  // InvoiceItem.productDescription).
+  poNumber       String?
+  createdBy      String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  items InvoiceItem[]
+}
+
+model InvoiceItem {
+  id            String   @id @default(uuid())
+  invoiceId     String
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  productId     String?
+  product       Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productName   String
+  productSku    String?
+  // Invoice Product Description — Editable Per Line Item: copied from the
+  // Product's description at the moment this line was added, then owned
+  // entirely by the invoice from then on (same design as
+  // Invoice.termsAndConditions). Editing this never touches the Product
+  // Master, and editing the Product Master never touches existing
+  // invoices. Null/empty means intentionally blank — nothing is printed
+  // beneath the product name in that case.
+  productDescription String?
+  serialNumber  String?
+  serialNumbers Json?
+  quantity      Int
+  unitPrice     Float    @default(0)
+  taxRate       Float    @default(0)
+  discount      Float    @default(0)
+  total         Float    @default(0)
+}
+
+model ProductCategory {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Vendor {
+  id             String   @id @default(uuid())
+  name           String
+  company        String
+  email          String?
+  phone          String
+  address        String?
+  city           String?
+  state          String?
+  country        String?
+  totalPurchases Float    @default(0)
+  status         String
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bills    Bill[]
+  payments VendorPayment[]
+  receipts VendorReceipt[]
+}
+
+model Bill {
+  id             String   @id @default(uuid())
+  billNumber     String
+  billType       String   @default("CREDIT")
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  subtotal       Float    @default(0)
+  taxAmount      Float    @default(0)
+  discountAmount Float    @default(0)
+  amount         Float    @default(0)
+  paidAmount     Float    @default(0)
+  balanceAmount  Float    @default(0)
+  status         String   @default("unpaid")
+  date           DateTime
+  dueDate        DateTime?
+  paidAt         DateTime?
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  createdBy      String?
+
+  items    BillItem[]
+  payments VendorPayment[]
+  receipts VendorReceipt[]
+
+  @@unique([vendorId, billNumber])
+}
+
+model VendorPayment {
+  id                  String   @id @default(uuid())
+  paymentNumber       String   @unique
+  vendorId            String
+  vendor              Vendor   @relation(fields: [vendorId], references: [id])
+  vendorBillId        String
+  vendorBill          Bill     @relation(fields: [vendorBillId], references: [id], onDelete: Cascade)
+  amount              Float
+  paymentMethod       String
+  bankAccount         String?
+  // Standard financial metadata — real FinancialAccount.id (see FinancialAccount model)
+  financialAccountId  String?
+  referenceNumber     String?
+  paymentDate         DateTime
+  balanceAfterPayment Float    @default(0)
+  notes               String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model VendorReceipt {
+  id                  String   @id @default(uuid())
+  receiptNumber       String   @unique
+  vendorId            String
+  vendor              Vendor   @relation(fields: [vendorId], references: [id])
+  vendorBillId        String
+  vendorBill          Bill     @relation(fields: [vendorBillId], references: [id], onDelete: Cascade)
+  amount              Float
+  paymentMethod       String
+  bankAccount         String?
+  // Standard financial metadata — real FinancialAccount.id (see FinancialAccount model)
+  financialAccountId  String?
+  referenceNumber     String?
+  paymentDate         DateTime
+  balanceAfterPayment Float    @default(0)
+  notes               String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model BillItem {
+  id            String   @id @default(uuid())
+  billId        String
+  bill          Bill     @relation(fields: [billId], references: [id], onDelete: Cascade)
+  productId     String?
+  product       Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productName   String
+  productSku    String?
+  serialNumber  String?
+  serialNumbers Json?
+  quantity      Int
+  unitPrice     Float    @default(0)
+  taxRate       Float    @default(0)
+  discount      Float    @default(0)
+  total         Float    @default(0)
+}
+
+model SerialUnit {
+  id                 String   @id @default(uuid())
+  serialNumber       String   @unique
+  productId          String
+  productName        String
+  productSku         String
+  barcode            String   @default("")
+  vendorId           String?
+  vendorName         String?
+  purchaseDate       DateTime?
+  costPrice          Float    @default(0)
+  status             String   @default("in_stock")
+  purchaseBillId     String?
+  purchaseBillNumber String?
+  purchaseUnitPrice  Float?
+  saleInvoiceId      String?
+  saleInvoiceNumber  String?
+  soldAt             DateTime?
+  customerId         String?
+  customerName       String?
+  saleUnitPrice      Float?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model SalaryAdvance {
+  id              String   @id @default(uuid())
+  employeeId      String
+  employeeName    String
+  date            DateTime
+  amount          Float
+  deductedAmount  Float    @default(0)
+  remainingAmount Float
+  reason          String?
+  notes           String?
+  status          String   @default("outstanding")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model SalaryPayment {
+  id                 String   @id @default(uuid())
+  paymentNumber      String   @unique
+  employeeId          String
+  employeeName        String
+  salaryPeriod        String
+  periodStart         DateTime?
+  periodEnd           DateTime?
+  baseSalary          Float
+  bonus               Float    @default(0)
+  otherDeductions     Float    @default(0)
+  advanceDeduction    Float    @default(0)
+  grossSalary         Float
+  netPayable          Float
+  amountPaid          Float    @default(0)
+  status              String   @default("pending")
+  paymentDate         DateTime?
+  paymentMethod       String?
+  // Standard financial metadata — real FinancialAccount.id, populated when
+  // paymentMethod is 'bank_transfer' (Employee Payments joining the shared
+  // Financial Account architecture).
+  financialAccountId  String?
+  notes               String?
+  advanceDeductions   Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model EmployeeLedgerEntry {
+  id            String   @id @default(uuid())
+  employeeId    String
+  employeeName  String
+  date          DateTime
+  type          String
+  description   String
+  debit         Float    @default(0)
+  credit        Float    @default(0)
+  balance       Float    @default(0)
+  referenceId   String?
+  referenceType String?
+  createdAt     DateTime @default(now())
+}
+model MiscLedgerEntry {
+  id                 String   @id @default(uuid())
+  label              String
+  description        String?
+  amount             Float
+  date               DateTime
+  // Standardised financial metadata — matches Vendor Payments / Invoice Payments
+  paymentMethod      String?
+  financialAccountId String?   // populated when paymentMethod = 'bank_transfer'
+  referenceNumber    String?   // canonical name; `reference` kept for backward compat
+  reference          String?   // legacy alias — do not remove
+  paymentDate        DateTime? // explicit payment date for Chart-of-Accounts integration
+  // Notes kept in DB for backward compat but removed from the UI form
+  notes              String?
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
