@@ -55,6 +55,18 @@ position?: string;
 status?: string;
 salary?: number;
 }) {
+// Public self-registration is only allowed to create the very first
+// account on a brand-new database (bootstrapping the first admin).
+// Once any user exists, this endpoint closes itself — further accounts
+// must be created from inside the app by a logged-in admin.
+const userCount = await this.prisma.user.count();
+
+if (userCount > 0) {
+  throw new BadRequestException(
+    'Registration is closed. Ask an existing admin to add your account from the Employees page.',
+  );
+}
+
 const existingUser = await this.prisma.user.findUnique({
 where: { email: data.email },
 });

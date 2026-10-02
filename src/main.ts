@@ -6,7 +6,7 @@ async function bootstrap() {
 
   const allowedOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim())
-    : ['https://tabindafrontend.vercel.app/login'];
+    : ['http://localhost:3000'];
 
   app.enableCors({
     origin: allowedOrigins,
